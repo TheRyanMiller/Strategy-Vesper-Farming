@@ -72,6 +72,9 @@ contract Strategy is BaseStrategy {
     uint256 public profit = 0;
 
     bool public useVvsp = false; // Allows us to control whether VSP rewards should be deposited to vVSP
+    bool private harvestVvsp = false;
+    uint256 public _keepVSP = 300000;
+    uint256 public constant DENOMINATOR = 1000000;
     
 
     constructor(address _vault) public BaseStrategy(_vault) {
@@ -102,23 +105,32 @@ contract Strategy is BaseStrategy {
         // TODO: Build a more accurate estimate using the value of all positions in terms of `want`
         uint256 totalWant = want.balanceOf(address(this));
 
-        // Convert accrued rewards to want
-        uint256 claimable = IPoolRewards(poolRewards).claimable(address(this));
-        if(claimable > 0){
-            totalWant.add(convertVspToWant(claimable));
+        // Calculate VSP holdings
+        uint256 totalVSP = IERC20(vsp).balanceOf(address(this));
+        uint256 vspVaultTokens = IVesperPool(vVSP).balanceOf(address(this));
+        if(vspVaultTokens > 0){
+            uint256 pps = IVesperPool(vVSP).getPricePerShare();
+            uint256 vaultBal = pps.mul(vspVaultTokens).div(1e18);
+            totalVSP.add(vaultBal);
+        }
+        totalVSP.add(IPoolRewards(poolRewards).claimable(address(this)));
+        if(totalVSP > 0){
+            totalWant.add(convertVspToWant(totalVSP));
         }
         
+        // Calculate want
+        return totalWant.add(calcWantHeldInVault());
+    }
+
+    function calcWantHeldInVault() internal view returns (uint256 totalWant) {
+        totalWant = 0;
         uint256 shares = IVesperPool(vUSDC).balanceOf(address(this));
         if(shares > 0){
             uint256 pps = morePrecisePricePerShare();
             uint256 withdrawableWant = pps.mul(shares).div(1e24);
-            //uint256 withdrawFee = withdrawableWant.mul(IVesperPool(vUSDC).withdrawFee()).div(1e18);
-            //withdrawableWant = withdrawableWant.sub(withdrawFee); // apply withdrawal fee to calculation
-            return totalWant.add(
-                convertFrom18(withdrawableWant)
-            ); 
+            totalWant.add(convertFrom18(withdrawableWant)); 
         }
-        return 0;
+        return totalWant;
     }
 
     function prepareReturn(uint256 _debtOutstanding)
@@ -137,11 +149,14 @@ contract Strategy is BaseStrategy {
             IPoolRewards(poolRewards).claimReward(address(this));
         }
 
-        withdrawFromVvsp(); // Call this even if useVvsp is false. Covers us in senario when we had a balance in vault when toggle switched off.
-
+        if(harvestVvsp){
+            withdrawAllVvsp(); // Call this even if useVvsp is false. Covers us in senario when we had a balance in vault when toggle switched off.
+        }
         uint256 vspBal = IERC20(vsp).balanceOf(address(this));
         if(vspBal > 0){
-            _sell(vspBal);
+            uint256 keepAmt = vspBal.mul(_keepVSP).div(DENOMINATOR);
+            uint256 sellAmt = vspBal.sub(keepAmt);
+            _sell(sellAmt);
         }
 
         uint256 debt = vault.strategies(address(this)).totalDebt;
@@ -153,10 +168,19 @@ contract Strategy is BaseStrategy {
         }else{
             _loss = debt.sub(currentValue);
         }
-        
-        // https://github.com/Grandthrax/SingleSidedCurve/blob/master/contracts/Strategy.sol#L158
 
         uint256 toFree = _debtPayment.add(_profit);
+
+        // Check if we'll need to dip into vsp vault to pay debt
+        if(toFree > calcWantHeldInVault()){
+            // Don't bother withdrawing some, just yank it all
+            withdrawAllVvsp();
+            uint256 vspBalance = IERC20(vsp).balanceOf(address(this));
+            if(vspBalance > 0){
+                _sell(vspBalance);
+            }
+            toFree = toFree.sub(want.balanceOf(address(this)));
+        }
 
         if(toFree > wantBalance){
             toFree = toFree.sub(wantBalance);
@@ -180,16 +204,15 @@ contract Strategy is BaseStrategy {
                 _debtPayment = wantBalance.sub(_profit);
             }
         }
-
         profit = _profit;  
     }
 
     function withdrawSome(uint256 _amount) internal returns (uint256 _liquidatedAmount, uint256 _loss) {
         uint256 wantBalanceBefore = want.balanceOf(address(this));
         uint256 vaultBalance = IERC20(vUSDC).balanceOf(address(this));
-        uint256 sharesToWithdraw = convertTo18(_amount)
+        uint256 sharesToWithdraw = convertTo18(_amount
                 .mul(1e24)
-                .div(morePrecisePricePerShare());
+                .div(morePrecisePricePerShare()));
         if(vaultBalance > 0){
             IVesperPool(vUSDC).withdraw(sharesToWithdraw);
         }
@@ -203,7 +226,7 @@ contract Strategy is BaseStrategy {
         }
     }
 
-    function withdrawFromVvsp() internal {
+    function withdrawAllVvsp() internal {
         uint256 vaultBalance = IERC20(vVSP).balanceOf(address(this));
         if(vaultBalance > 0){
             IVesperPool(vVSP).withdraw(vaultBalance);
@@ -244,7 +267,7 @@ contract Strategy is BaseStrategy {
 
         if (_amountNeeded > wantBal) {
             // Need more want to meet request. Must convert to 18 decimals
-            (_liquidatedAmount, _loss) = withdrawSome(_amountNeeded);
+            (_liquidatedAmount, _loss) = withdrawSome(_amountNeeded.sub(wantBal));
         }
         _liquidatedAmount = Math.min(_amountNeeded, _liquidatedAmount.add(wantBal));
     }
@@ -276,6 +299,7 @@ contract Strategy is BaseStrategy {
         // want is taken care of by baseStrategy, but we must send pool tokens to new strat
         IERC20(vUSDC).transfer(_newStrategy, IERC20(vUSDC).balanceOf(address(this)));
         IERC20(vsp).transfer(_newStrategy, IERC20(vsp).balanceOf(address(this)));
+        IERC20(vVSP).transfer(_newStrategy, IERC20(vVSP).balanceOf(address(this)));
     }
     
     function convertVspToWant(uint256 _amount) internal view returns (uint256) {
@@ -294,9 +318,14 @@ contract Strategy is BaseStrategy {
         useVvsp = !useVvsp;
     }
 
+    function toggleHarvestVvsp() external onlyGovernance {
+        harvestVvsp = !harvestVvsp;
+    }
+
     function protectedTokens() internal view override returns (address[] memory) {
-        address[] memory protected = new address[](1);
+        address[] memory protected = new address[](2);
         protected[0] = vsp;
+        protected[1] = vUSDC;
     }
 
     function morePrecisePricePerShare() public view returns (uint256) {

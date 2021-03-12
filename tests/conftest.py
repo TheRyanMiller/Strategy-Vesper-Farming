@@ -10,7 +10,7 @@ def gov(accounts):
 
 @pytest.fixture
 def rewards(accounts):
-    yield accounts[1]
+    yield accounts[0]
 
 
 @pytest.fixture
@@ -94,3 +94,7 @@ def strategy(strategist, keeper, vault, Strategy, gov):
 @pytest.fixture
 def vUSDC():
     yield Contract("0x0C49066C0808Ee8c673553B7cbd99BCC9ABf113d")
+
+@pytest.fixture
+def vVSP():
+    yield Contract("0xbA4cFE5741b357FA371b506e5db0774aBFeCf8Fc")
