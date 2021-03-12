@@ -1,0 +1,310 @@
+// SPDX-License-Identifier: AGPL-3.0
+// Feel free to change the license, but this is what we use
+
+// Feel free to change this version of Solidity. We support >=0.6.0 <0.7.0;
+pragma solidity 0.6.12;
+pragma experimental ABIEncoderV2;
+
+// These are the core Yearn libraries
+import {
+    BaseStrategy,
+    StrategyParams
+} from "@yearnvaults/contracts/BaseStrategy.sol";
+import {
+    SafeERC20,
+    SafeMath,
+    IERC20,
+    Address
+} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts/math/Math.sol";
+
+interface IPoolRewards {
+    function claimReward(address) external;
+    function claimable(address) external view returns (uint256);
+    function pool() external view returns (address);
+    function rewardPerToken() external view returns (uint256);
+}
+
+interface IVesperPool {
+    function approveToken() external;
+    function deposit(uint256) external;
+    function withdraw(uint256) external;
+    function balanceOf(address) external view returns (uint256);
+    function totalSupply() external view returns (uint256);
+    function totalValue() external view returns (uint256);
+    function rewardPerToken() external view returns (uint256);
+    function getPricePerShare() external view returns (uint256);
+    function withdrawFee() external view returns (uint256);
+}
+
+interface IUniswapV2Router {
+    function getAmountsOut(uint256 amountIn, address[] calldata path)
+        external
+        view
+        returns (uint256[] memory amounts);
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+}
+
+contract Strategy is BaseStrategy {
+    using SafeERC20 for IERC20;
+    using Address for address;
+    using SafeMath for uint256;
+
+    // Vesper contracts: https://docs.vesper.finance/vesper-grow-pools/vesper-grow/audits#vesper-pool-contracts
+    // Vesper vault strategies: https://medium.com/vesperfinance/vesper-grow-strategies-today-and-tomorrow-8bd7b907ba5
+    address public constant vUSDC =         0x0C49066C0808Ee8c673553B7cbd99BCC9ABf113d;
+    address public constant uniswap =       0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+    address public constant sushiswap =     0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F;
+    address public activeDex =              0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F;
+    address public constant vsp =           0x1b40183EFB4Dd766f11bDa7A7c3AD8982e998421;
+    address public constant vVSP =          0xbA4cFE5741b357FA371b506e5db0774aBFeCf8Fc;
+    address public constant poolRewards =   0xd59996055b5E0d154f2851A030E207E0dF0343B0;
+    address public constant usdc =          0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address public constant weth =          0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address[] public vspPath;
+
+    uint256 public profit = 0;
+
+    bool public useVvsp = false; // Allows us to control whether VSP rewards should be deposited to vVSP
+    
+
+    constructor(address _vault) public BaseStrategy(_vault) {
+        // You can set these parameters on deployment to whatever you want
+        // maxReportDelay = 6300;
+        // profitFactor = 100;
+        // debtThreshold = 0;
+
+        IERC20(vsp).approve(sushiswap, uint256(-1));
+        IERC20(vsp).approve(uniswap, uint256(-1));
+        IERC20(vsp).approve(vVSP, uint256(-1));
+        want.approve(vUSDC, uint256(-1));
+
+        vspPath = new address[](3);
+        vspPath[0] = vsp;
+        vspPath[1] = weth;
+        vspPath[2] = usdc;
+    }
+
+    // ******** OVERRIDE THESE METHODS FROM BASE CONTRACT ************
+
+    function name() external view override returns (string memory) {
+        // Add your own name here, suggestion e.g. "StrategyCreamYFI"
+        return "StrategyVesperUSDC";
+    }
+
+    function estimatedTotalAssets() public view override returns (uint256) {
+        // TODO: Build a more accurate estimate using the value of all positions in terms of `want`
+        uint256 totalWant = want.balanceOf(address(this));
+
+        // Convert accrued rewards to want
+        uint256 claimable = IPoolRewards(poolRewards).claimable(address(this));
+        if(claimable > 0){
+            totalWant.add(convertVspToWant(claimable));
+        }
+        
+        uint256 shares = IVesperPool(vUSDC).balanceOf(address(this));
+        if(shares > 0){
+            // uint256 pps = morePrecisePricePerShare();
+            // uint256 withdrawableWant = pps.mul(shares).div(1e24);
+            uint256 withdrawableWant = shares.mul(
+                convertTo18(IVesperPool(vUSDC).totalValue()))
+                .div(IVesperPool(vUSDC).totalSupply());
+
+            //uint256 withdrawFee = withdrawableWant.mul(IVesperPool(vUSDC).withdrawFee()).div(1e18);
+            //withdrawableWant = withdrawableWant.sub(withdrawFee); // apply withdrawal fee to calculation
+            return totalWant.add(
+                convertFrom18(withdrawableWant)
+            ); 
+        }
+        return 0;
+    }
+
+    function prepareReturn(uint256 _debtOutstanding)
+        internal
+        override
+        returns (
+            uint256 _profit,
+            uint256 _loss,
+            uint256 _debtPayment
+        )
+    {
+        _debtPayment = _debtOutstanding;
+
+        uint256 claimable = IPoolRewards(poolRewards).claimable(address(this));
+        if(claimable > 0){
+            IPoolRewards(poolRewards).claimReward(address(this));
+        }
+
+        withdrawFromVvsp(); // Call this even if useVvsp is false. Covers us in senario when we had a balance in vault when toggle switched off.
+
+        uint256 vspBal = IERC20(vsp).balanceOf(address(this));
+        if(vspBal > 0){
+            _sell(vspBal);
+        }
+
+        uint256 debt = vault.strategies(address(this)).totalDebt;
+        uint256 currentValue = estimatedTotalAssets();
+        uint256 wantBalance = want.balanceOf(address(this));
+        
+        if(debt < currentValue){
+            _profit = currentValue.sub(debt);
+        }else{
+            _loss = debt.sub(currentValue);
+        }
+        
+        // https://github.com/Grandthrax/SingleSidedCurve/blob/master/contracts/Strategy.sol#L158
+
+        uint256 toFree = _debtPayment.add(_profit);
+
+        if(toFree > wantBalance){
+            toFree = toFree.sub(wantBalance);
+            
+            (uint256 liquidatedAmount, uint256 withdrawalLoss) = withdrawSome(toFree);
+            
+            if(withdrawalLoss < _profit){
+                _profit = _profit.sub(withdrawalLoss);
+            }
+            else{
+                _loss = _loss.add(withdrawalLoss.sub(_profit));
+                _profit = 0;
+            }
+            wantBalance = want.balanceOf(address(this));
+
+            if(wantBalance < _profit){
+                _profit = wantBalance;
+                _debtPayment = 0;
+            }
+            else if (wantBalance < _debtPayment.add(_profit)){
+                _debtPayment = wantBalance.sub(_profit);
+            }
+        }
+
+        profit = _profit;  
+    }
+
+    function withdrawSome(uint256 _amount) internal returns (uint256 _liquidatedAmount, uint256 _loss) {
+        uint256 wantBalanceBefore = want.balanceOf(address(this));
+        uint256 vaultBalance = IERC20(vUSDC).balanceOf(address(this));
+        uint256 sharesToWithdraw = convertTo18(_amount)
+                .mul(1e24)
+                .div(morePrecisePricePerShare());
+        if(vaultBalance > 0){
+            IVesperPool(vUSDC).withdraw(sharesToWithdraw);
+        }
+        uint256 withdrawnAmount = want.balanceOf(address(this)).sub(wantBalanceBefore);
+        if(withdrawnAmount >= _amount){
+            _liquidatedAmount = _amount;
+        }
+        else{
+            _liquidatedAmount = withdrawnAmount;
+            _loss = _amount.sub(withdrawnAmount);
+        }
+    }
+
+    function withdrawFromVvsp() internal {
+        uint256 vaultBalance = IERC20(vVSP).balanceOf(address(this));
+        if(vaultBalance > 0){
+            IVesperPool(vVSP).withdraw(vaultBalance);
+        }
+    }
+
+    function adjustPosition(uint256 _debtOutstanding) internal override {
+        if (emergencyExit) {
+            return;
+        }
+        
+        uint256 wantBal = want.balanceOf(address(this));
+
+        // In case we need to return want to the vault
+        if (_debtOutstanding > wantBal) {
+            return;
+        }
+
+        // Invest available want
+        uint256 _wantAvailable = wantBal.sub(_debtOutstanding);
+        if (_wantAvailable > 0) {
+            IVesperPool(vUSDC).deposit(_wantAvailable);
+        }
+
+        // Claim VSP and stake into vVSP vault to increase VSP rewards
+        if(useVvsp){
+            IPoolRewards(poolRewards).claimReward(address(this));
+            uint256 rewards = IERC20(vsp).balanceOf(address(this));
+            if(rewards > 0){
+                IVesperPool(vVSP).deposit(rewards);
+            }
+        }
+    }
+
+    function liquidatePosition(uint256 _amountNeeded) internal override returns (uint256 _liquidatedAmount, uint256 _loss) {
+
+        uint256 wantBal = want.balanceOf(address(this));
+
+        if (_amountNeeded > wantBal) {
+            // Need more want to meet request. Must convert to 18 decimals
+            (_liquidatedAmount, _loss) = withdrawSome(_amountNeeded);
+        }
+        _liquidatedAmount = Math.min(_amountNeeded, _liquidatedAmount.add(wantBal));
+    }
+
+    function tendTrigger(uint256 callCost) public override virtual view returns (bool) {
+        // We want to periodically invest our accrued VSP rewards balance into the vault to grow them further
+        if(!useVvsp) return false; // If we've chosen not to use the vVSP vault, return false
+
+        uint256 claimable = IPoolRewards(poolRewards).claimable(address(this));
+        if(claimable > 0){
+            uint256 wantValue = convertVspToWant(claimable);
+            if(wantValue < callCost){
+                return false; // This will almost never be worth it if we harvest ~daily.
+            }
+            else{
+                return false;
+            }
+        }
+        else{
+            return false;
+        }
+    }
+
+    function _sell(uint256 _amount) internal {
+        IUniswapV2Router(activeDex).swapExactTokensForTokens(_amount, uint256(0), vspPath, address(this), now);
+    }
+
+    function prepareMigration(address _newStrategy) internal override {
+        // want is taken care of by baseStrategy, but we must send pool tokens to new strat
+        IERC20(vUSDC).transfer(_newStrategy, IERC20(vUSDC).balanceOf(address(this)));
+        IERC20(vsp).transfer(_newStrategy, IERC20(vsp).balanceOf(address(this)));
+    }
+    
+    function convertVspToWant(uint256 _amount) internal view returns (uint256) {
+        return IUniswapV2Router(activeDex).getAmountsOut(_amount, vspPath)[vspPath.length - 1];
+    }
+
+    function convertFrom18(uint256 _value) public pure returns (uint256) {
+        return _value.div(10**12);
+    }
+
+    function convertTo18(uint256 _value) public pure returns (uint256) {
+        return _value.mul(10**12);
+    }
+
+    function toggleUseVvsp() external onlyGovernance {
+        useVvsp = !useVvsp;
+    }
+
+    function protectedTokens() internal view override returns (address[] memory) {
+        address[] memory protected = new address[](1);
+        protected[0] = vsp;
+    }
+
+    function morePrecisePricePerShare() public view returns (uint256) {
+        // We do this because Vesper's contract gives us a not-very-precise pps
+        return IVesperPool(vUSDC).totalValue().mul(1e36).div(IVesperPool(vUSDC).totalSupply());
+    }
+}
