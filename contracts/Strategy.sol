@@ -71,7 +71,7 @@ contract Strategy is BaseStrategy {
 
     bool public useVvsp = true; // Allows us to control whether VSP rewards should be deposited to vVSP
     bool private harvestVvsp = false;
-    uint256 public _keepVSP = 0; // 30%
+    uint256 public _keepVSP = 3000; // 30%
     uint256 public constant DENOMINATOR = 10000;
     
 
@@ -105,10 +105,10 @@ contract Strategy is BaseStrategy {
 
         // Calculate VSP holdings
         uint256 totalVSP = IERC20(vsp).balanceOf(address(this));
-        uint256 vspVaultTokens = IVesperPool(vVSP).balanceOf(address(this));
-        if(vspVaultTokens > 0){
+        uint256 vspShares = IVesperPool(vVSP).balanceOf(address(this));
+        if(vspShares > 0){
             uint256 pps = IVesperPool(vVSP).getPricePerShare();
-            uint256 vaultBal = pps.mul(vspVaultTokens).div(1e18);
+            uint256 vaultBal = pps.mul(vspShares).div(1e18);
             totalVSP.add(vaultBal);
         }
         totalVSP.add(IPoolRewards(poolRewards).claimable(address(this)));
@@ -118,10 +118,10 @@ contract Strategy is BaseStrategy {
         
         // Calculate want
         totalWant.add(want.balanceOf(address(this)));
-        return totalWant.add(calcWantHeldInVault());
+        return totalWant.add(calcWantHeldInVesper());
     }
 
-    function calcWantHeldInVault() internal view returns (uint256 wantBalance) {
+    function calcWantHeldInVesper() internal view returns (uint256 wantBalance) {
         wantBalance = 0;
         uint256 shares = IVesperPool(vUSDC).balanceOf(address(this));
         if(shares > 0){
@@ -147,10 +147,11 @@ contract Strategy is BaseStrategy {
             IPoolRewards(poolRewards).claimReward(address(this));
         }
 
+        // Check if we are harvesting the vVSP vault
         if(harvestVvsp){
             withdrawAllVvsp();
-            harvestVvsp = false;
             _sell(IERC20(vsp).balanceOf(address(this)));
+            harvestVvsp = false;
         }
         else{
             uint256 vspBal = IERC20(vsp).balanceOf(address(this));
@@ -174,7 +175,7 @@ contract Strategy is BaseStrategy {
         uint256 toFree = _debtPayment.add(_profit);
 
         // Unlikely, but let's check if we'll need to dip into vsp vault to pay debt
-        if(toFree > calcWantHeldInVault()){
+        if(toFree > calcWantHeldInVesper()){
             // Don't bother withdrawing some, just yank it all
             withdrawAllVvsp();
             uint256 vspBalance = IERC20(vsp).balanceOf(address(this));
