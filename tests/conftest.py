@@ -50,6 +50,9 @@ def amount(accounts, token, user):
     # it impersonate an exchange address to use it's funds.
     reserve = accounts.at("0xF977814e90dA44bFA03b6295A0616a897441aceC", force=True)
     token.transfer(user, amount, {"from": reserve})
+    token.transfer(accounts[9], amount, {"from": reserve})
+    token.transfer(accounts[8], amount, {"from": reserve})
+    token.transfer(accounts[7], amount, {"from": reserve})
     yield amount
 
 
@@ -89,7 +92,8 @@ def strategy(strategist, keeper, vault, Strategy, gov):
     strategy = strategist.deploy(Strategy, vault)
     strategy.setKeeper(keeper)
     strategy.setStrategist(strategist,{"from": gov})
-    vault.addStrategy(strategy, 10_000, 0, 2 ** 256 - 1, 1_000, {"from": gov})
+    debtRatio = 10_000 # 100%
+    vault.addStrategy(strategy, debtRatio, 0, 2 ** 256 - 1, 1_000, {"from": gov})
     yield strategy
 
 @pytest.fixture

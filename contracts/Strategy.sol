@@ -70,7 +70,7 @@ contract Strategy is BaseStrategy {
     address[] public vspPath;
 
     bool public useVvsp = true; // Allows us to control whether VSP rewards should be deposited to vVSP
-    bool private harvestVvsp =  false;
+    bool private harvestVvsp =  false; // private to hide visibility
     uint256 public _keepVSP =   3000; // 30%
     uint256 public constant DENOMINATOR = 10000;
     
@@ -140,14 +140,15 @@ contract Strategy is BaseStrategy {
             uint256 _debtPayment
         )
     {
-        _debtPayment = _debtOutstanding;
+        
+        _debtPayment = _debtOutstanding; // default is to pay the full debt
 
+        // Here we begin doing stuff to make our profits
         uint256 claimable = IPoolRewards(poolRewards).claimable(address(this));
         if(claimable > 0){
             IPoolRewards(poolRewards).claimReward(address(this));
         }
-
-        // Check if we are harvesting the vVSP vault
+        // Check wheter this harvest should the vVSP vault
         if(harvestVvsp){
             withdrawAllVvsp();
             uint256 toSell = IERC20(vsp).balanceOf(address(this));
@@ -168,33 +169,45 @@ contract Strategy is BaseStrategy {
         }
 
         uint256 debt = vault.strategies(address(this)).totalDebt;
-        uint256 currentValue = estimatedTotalAssets();
         uint256 wantBalance = want.balanceOf(address(this));
+        uint256 assets = wantBalance.add(calcWantHeldInVesper()); // Don't include kept vsp
         
-        if(debt < currentValue){
-            _profit = currentValue.sub(debt);
+        if(debt < assets){
+            _profit = assets.sub(debt);
         }
-        else{
-            _loss = debt.sub(currentValue);
+        else{ // This is bad, would imply strategy is net negative
+            _loss = debt.sub(assets);
         }
 
-        uint256 toFree = _debtPayment.add(_profit);
+        // We want to free up enough to pay debt, without dipping into harvest profits
+        uint256 toFree = _debtOutstanding.add(_profit);
 
-        // Unlikely, but let's check if we'll need to dip into vsp vault to pay debt
+        // Unlikely, but let's check if debt is high enought that 
+        // we'll need to dip into vsp vault to pay debt
         if(toFree > calcWantHeldInVesper()){
-            // Don't bother withdrawing some, just yank it all
+            // Don't bother withdrawing "some", just yank it all
             withdrawAllVvsp();
             uint256 vspBalance = IERC20(vsp).balanceOf(address(this));
             if(vspBalance > 0){
                 _sell(vspBalance);
-            }
-            uint256 wantAfter = want.balanceOf(address(this)).sub(wantBalance); // Amount we just bought
-            toFree = toFree.sub(wantAfter);
+                uint256 newBalance = want.balanceOf(address(this));
+                uint256 wantAfter = newBalance.sub(wantBalance); // Amount we just bought
+                wantBalance = newBalance;
+                // Check if we have enough
+                if(wantBalance > toFree){
+                    toFree = 0;
+                    _profit = wantBalance.sub(_debtPayment);
+                }
+                else{
+                    toFree = toFree.sub(wantBalance);
+                }
+            }      
         }
+
 
         if(toFree > wantBalance){
             toFree = toFree.sub(wantBalance);
-            
+
             (uint256 liquidatedAmount, uint256 withdrawalLoss) = withdrawSome(toFree);
             
             if(withdrawalLoss < _profit){
@@ -204,7 +217,6 @@ contract Strategy is BaseStrategy {
                 _loss = _loss.add(withdrawalLoss.sub(_profit));
                 _profit = 0;
             }
-            wantBalance = want.balanceOf(address(this));
 
             if(wantBalance < _profit){
                 _profit = wantBalance;

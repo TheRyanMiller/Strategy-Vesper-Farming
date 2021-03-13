@@ -1,47 +1,81 @@
 import brownie
 from brownie import Contract
+from helpers import stratData,vaultData
 
 
 def test_operation(accounts, token, vault, strategy, strategist, amount, user, vUSDC, chain, gov, vVSP, vsp, vvspStrat):
-    
+    one_day = 86400
     # Deposit to the vault
     token.approve(vault.address, amount, {"from": user})
     vault.deposit(amount, {"from": user})
     assert token.balanceOf(vault.address) == amount
+    vaultData(vault, token)
+    stratData(strategy, token, vUSDC, vVSP, vsp)
 
-    # harvest
+    # harvest 1
     strategy.harvest({"from": strategist})
-    assert strategy.estimatedTotalAssets()+1 == amount # Won't match because we must account for withdraw fees
+    chain.mine(1)
+    vaultData(vault, token)
+    stratData(strategy, token, vUSDC, vVSP, vsp)
+    assert strategy.estimatedTotalAssets()+1 >= amount # Won't match because we must account for withdraw fees
 
     # tend()
     # strategy.tend({"from": strategist})
     
-    # Allow rewards to be earned
-    one_day = 86400
-    chain.sleep(one_day*6) # 1 day
+    # Harvest 2: Allow rewards to be earned
+    print("\n**Harvest 2**")
+    chain.sleep(one_day)
     chain.mine(1)
     strategy.harvest({"from": strategist})
+    vaultData(vault, token)
+    stratData(strategy, token, vUSDC, vVSP, vsp)
 
     print("\nEst APR: ", "{:.2%}".format(
-            ((vault.totalAssets() - amount) * 365/6) / (amount)
+            ((vault.totalAssets() - amount) * 365) / (amount)
         )
     )
 
+    # Harvest 3
+    print("\n**Harvest 3**")
     chain.sleep(one_day)
+    chain.mine(1)
     # vVSP.rebalance({"from": strategist}) # must be called from pool... this is hard to test.
-    #strategy.toggleHarvestVvsp({"from":strategist}) # Dump VSP tokens this time
+    # strategy.toggleHarvestVvsp({"from":strategist}) # Dump VSP tokens this time
     strategy.harvest({"from": strategist})
+    vaultData(vault, token)
+    stratData(strategy, token, vUSDC, vVSP, vsp)
 
     # Current contract has rewards emissions ending on Mar 19, so we shouldnt project too far
     print("\nEst APR: ", "{:.2%}".format(
-            ((vault.totalAssets() - amount) * 365/7) / (amount)
+            ((vault.totalAssets() - amount) * 365/2) / (amount)
         )
     )
-    # withdrawal
+
+    # Harvest 4
+    print("\n**Harvest 4**")
+    chain.sleep(one_day)
+    chain.mine(1)
+    # vVSP.rebalance({"from": strategist}) # must be called from pool... this is hard to test.
+    strategy.toggleHarvestVvsp({"from":strategist}) # Dump VSP tokens this time
+    strategy.harvest({"from": strategist})
+    vaultData(vault, token)
+    stratData(strategy, token, vUSDC, vVSP, vsp)
+
+    # Current contract has rewards emissions ending on Mar 19, so we shouldnt project too far
+    print("\nEst APR: ", "{:.2%}".format(
+            ((vault.totalAssets() - amount) * 365/3) / (amount)
+        )
+    )
+
+    # Harves 5
+    print("\n**Harvest 5**")
     chain.sleep(3600) # wait six hours for a profitable withdraw
     vault.withdraw(vault.balanceOf(user),user,61,{"from": user}) # Need more loss protect to handle 0.6% withdraw fee
-    assert token.balanceOf(user) != 0
-
+    vaultData(vault, token)
+    stratData(strategy, token, vUSDC, vVSP, vsp)
+    assert token.balanceOf(user) > amount * 0.994 * .78 # Ensure profit was made after withdraw fee
+    assert vault.balanceOf(vault.rewards()) > 0 # Check mgmt fee
+    assert vault.balanceOf(strategy) > 0 # Check perf fee
 
 def test_emergency_exit(accounts, token, vault, strategy, strategist, amount, user, vVSP):
     # Deposit to the vault
