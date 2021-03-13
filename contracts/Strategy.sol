@@ -353,6 +353,15 @@ contract Strategy is BaseStrategy {
         harvestVvsp = true;
     }
 
+    function toggleActiveDex() external onlyGovernance {
+        if(!activeDex == sushiswap){
+            activeDex = uniswap;
+        }
+        else{
+            activeDex = sushiswap;
+        }
+    }
+
     function protectedTokens() internal view override returns (address[] memory) {
         address[] memory protected = new address[](2);
         protected[0] = vsp;
