@@ -274,10 +274,12 @@ contract Strategy is BaseStrategy {
 
         // Check are we using the vsp vault? If so claim rewards and deposit
         if(useVvsp){
-            IPoolRewards(poolRewards).claimReward(address(this));
-            uint256 rewards = IERC20(vsp).balanceOf(address(this));
-            if(rewards > 0){
-                IVesperPool(vVSP).deposit(rewards);
+            if(IPoolRewards(poolRewards).claimable(address(this)) > 0) {
+                IPoolRewards(poolRewards).claimReward(address(this));
+                uint256 rewards = IERC20(vsp).balanceOf(address(this));
+                if(rewards > 0){
+                    IVesperPool(vVSP).deposit(rewards);
+                }
             }
         }
     }
@@ -291,25 +293,6 @@ contract Strategy is BaseStrategy {
             (_liquidatedAmount, _loss) = withdrawSome(_amountNeeded.sub(wantBal));
         }
         _liquidatedAmount = Math.min(_amountNeeded, _liquidatedAmount.add(wantBal));
-    }
-
-    function tendTrigger(uint256 callCost) public override virtual view returns (bool) {
-        // We want to periodically invest our accrued VSP rewards balance into the vault to grow them further
-        if(!useVvsp) return false; // If we've chosen not to use the vVSP vault, return false
-
-        uint256 claimable = IPoolRewards(poolRewards).claimable(address(this));
-        if(claimable > 0){
-            uint256 wantValue = convertVspToWant(claimable);
-            if(wantValue < callCost){
-                return false; // This will almost never be worth it if we harvest ~daily.
-            }
-            else{
-                return false;
-            }
-        }
-        else{
-            return false;
-        }
     }
 
     function _sell(uint256 _amount) internal {
