@@ -36,6 +36,10 @@ def keeper(accounts):
 def user(accounts):
     yield accounts[6]
 
+@pytest.fixture
+def user2(accounts):
+    yield accounts[7]
+
 
 @pytest.fixture
 def token():
@@ -44,13 +48,13 @@ def token():
 
 
 @pytest.fixture
-def amount(accounts, token, user):
+def amount(accounts, token, user, user2):
     amount = 10_000 * 10 ** token.decimals()
     # In order to get some funds for the token you are about to use,
     # it impersonate an exchange address to use it's funds.
     reserve = accounts.at("0xF977814e90dA44bFA03b6295A0616a897441aceC", force=True)
     token.transfer(user, amount, {"from": reserve})
-    token.transfer(accounts[9], amount, {"from": reserve})
+    token.transfer(user2, amount, {"from": reserve})
     token.transfer(accounts[8], amount, {"from": reserve})
     token.transfer(accounts[7], amount, {"from": reserve})
     yield amount
