@@ -124,7 +124,7 @@ def test_change_debt(gov, token, vault, strategy, strategist, amount, user, vUSD
 
     vault.updateStrategyDebtRatio(strategy.address, 10_000, {"from": gov})
     strategy.harvest({"from": strategist})
-    assert strategy.estimatedTotalAssets() >= amount
+    assert strategy.estimatedTotalAssets()+1 >= amount
 
     # In order to pass this tests, you will need to implement prepareReturn.
     # TODO: uncomment the following lines.
